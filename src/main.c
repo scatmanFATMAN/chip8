@@ -1,6 +1,3 @@
-//http://www.multigesture.net/articles/how-to-write-an-emulator-chip-8-interpreter/
-//https://github.com/JamesGriffin/CHIP-8-Emulator/tree/master/src
-
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -229,9 +226,7 @@ draw_game_win(WINDOW *win) {
 
             if (gfx[x + (y * 64)]) {
                 wattron(win, A_REVERSE | COLOR_PAIR(1));
-                //waddch(win, '*');
                 waddch(win, ' ');
-                //wattroff(COLOR_PAIR(1));
                 wattroff(win, A_REVERSE | COLOR_PAIR(1));
             }
             else {
@@ -380,6 +375,7 @@ cycle() {
 
     opcode = memory[pc] << 8 | memory[pc + 1];
 
+    //temporary: was using this to debug a certain opcode
     if ((opcode & 0xF000) == 0xF000 && (opcode & 0x00FF) == 0x0055) {
         //debugger_stepping = true;
     }
@@ -702,6 +698,9 @@ cycle() {
 //these timers count at 60Hz
 //instead of doing 60 decrements and then sleeping for the remainder of the second,
 //do 10 iterations of 6 decrements and sleep for the remainder of any 100 milliseconds
+//hopefully this will cause the sleep times to be distributed more evenly within the 60 seconds
+//instead of doing 1 large sleep to fill the remainder of the second.
+//i have not tested this a whole lot though
 static void *
 handle_timers(void *ptr) {
     uint64_t frame_start, diff;
@@ -741,6 +740,11 @@ handle_timers(void *ptr) {
     return NULL;
 }
 
+
+//ncurses doesn't have good keyboard support so our keyboard handling is going to 
+//be a little slow to respond
+//simulate keyup and keydown
+//keyup occurs after 100ms of it not being down
 static void *
 handle_keyboard(void *ptr) {
     uint64_t timers[16], now;
