@@ -113,7 +113,9 @@ static bool looping = true;
 static bool debugger_stepping = false;
 
 //frames per second
-static int fps = 120;
+static const char *opt_path = NULL;
+static int opt_fps = 120;
+static int opt_color = COLOR_GREEN;
 
 static uint64_t counter_frames;
 static time_t program_start;
@@ -132,6 +134,7 @@ log_write(const char *fmt, ...) {
     va_list ap;
     int i;
 
+    //shift lines up to make room for our new line
     for (i = LOG_LINES_MAX - 1; i > 0; i--) {
         memcpy(log_lines[i], log_lines[i - 1], LOG_LINE_LEN + 1);
     }
@@ -151,7 +154,9 @@ initialize() {
     memset(gfx, 0, sizeof(gfx));
     memset(key, 0, sizeof(key));
 
+    //program counter starts 512 bytes into memory
     pc = 0x200;
+
     opcode = 0;
     I = 0;
     sp = 0;
@@ -193,18 +198,19 @@ initialize() {
 }
 
 static bool
-load(const char *path) {
+load() {
     FILE *f;
     size_t count;
 
-    log_write("Loading %s", path);
+    log_write("Loading %s", opt_path);
 
-    f = fopen(path, "rb");
+    f = fopen(opt_path, "rb");
     if (f == NULL) {
         log_write("%s", strerror(errno));
         return false;
     }
 
+    //read the ROM starting at 512 bytes into memory
     count = fread(memory + 512, sizeof(unsigned char), sizeof(memory) - 512, f);
     fclose(f);
 
@@ -217,32 +223,36 @@ load(const char *path) {
 }
 
 static void
-draw_game_win(WINDOW *win) {
+draw_game_win() {
     int x, y;
 
     for (y = 0; y < GFX_HEIGHT; y++) {
         for (x = 0; x < GFX_WIDTH; x++) {
-            wmove(win, y + 1, x + 1);
+            wmove(win_game, y + 1, x + 1);
 
             if (gfx[x + (y * 64)]) {
-                wattron(win, A_REVERSE | COLOR_PAIR(1));
-                waddch(win, ' ');
-                wattroff(win, A_REVERSE | COLOR_PAIR(1));
+                wattron(win_game, A_REVERSE | COLOR_PAIR(1));
+                waddch(win_game, ' ');
+                wattroff(win_game, A_REVERSE | COLOR_PAIR(1));
             }
             else {
-                waddch(win, ' ');
+                waddch(win_game, ' ');
             }
         }
     }
 
-    wrefresh(win);
+    wrefresh(win_game);
 }
 
 static void
-draw_log_win(WINDOW *win) {
+draw_log_win() {
     int i, j, c;
     bool done;
 
+    //we need to touch every coordinate in the window
+    //if we're done drawing the string (reached NULL), then we need to fill
+    //the remainder of the line with blank spaces so we overwrite any previous
+    //and longer string that might have been there
     for (i = 0; i < LOG_LINES_MAX; i++) {
         done = false;
 
@@ -260,11 +270,11 @@ draw_log_win(WINDOW *win) {
                 }
             }
 
-            mvwaddch(win, LOG_LINES_MAX - i, j + 1, c);
+            mvwaddch(win_log, LOG_LINES_MAX - i, j + 1, c);
         }
     }
 
-    wrefresh(win);
+    wrefresh(win_log);
 }
 
 static void
@@ -280,6 +290,8 @@ draw_debugger_win(const char *state) {
     for (col = 1; col < DEBUGGER_LINE_LEN - 1; col++) {
         mvwaddch(win_debugger, 6, col, ' ');
     }
+
+    //TODO: add the rest of the opcodes
     switch (opcode & 0xF000) {
         case 0x2000:
             mvwprintw(win_debugger, 6, 1, "Call subroutine at NNN");
@@ -348,7 +360,7 @@ draw_debugger_win(const char *state) {
 
     row += 3;
     t = time(NULL) - program_start;
-    mvwprintw(win_debugger, row, 1, "Target FPS: %d", fps);
+    mvwprintw(win_debugger, row, 1, "Target FPS: %d", opt_fps);
     if (t > 0) {
         mvwprintw(win_debugger, row + 1, 1, "Actual FPS: %ld", counter_frames / t);
     }
@@ -695,45 +707,40 @@ cycle() {
     return true;
 }
 
-//these timers count at 60Hz
-//instead of doing 60 decrements and then sleeping for the remainder of the second,
-//do 10 iterations of 6 decrements and sleep for the remainder of any 100 milliseconds
-//hopefully this will cause the sleep times to be distributed more evenly within the 60 seconds
-//instead of doing 1 large sleep to fill the remainder of the second.
-//i have not tested this a whole lot though
+//these timers always count at 60Hz
 static void *
 handle_timers(void *ptr) {
     uint64_t frame_start, diff;
-    int i, j;
+    double ms_per_frame;
     bool do_beep;
 
+    ms_per_frame = 1000.0 / 60.0;
+
     while (looping) {
-        for (i = 0; i < 10; i++) {
-            frame_start = time_ms();
+        frame_start = time_ms();
 
-            pthread_rwlock_wrlock(&dt_lock);
-            for (j = 0; j < 6 && dt > 0; j++) {
-                --dt;
-            }
-            pthread_rwlock_unlock(&dt_lock);
+        pthread_rwlock_wrlock(&dt_lock);
+        if (dt > 0) {
+            --dt;
+        }
+        pthread_rwlock_unlock(&dt_lock);
 
-            do_beep = false;
-            pthread_rwlock_wrlock(&st_lock);
-            for (j = 0; j < 6 && st > 0; j++) {
-                if (st == 1) {
-                    do_beep = true;
-                }
-                --st;
+        do_beep = false;
+        pthread_rwlock_wrlock(&st_lock);
+        if (st > 0) {
+            if (st == 1) {
+                do_beep = true;
             }
-            pthread_rwlock_unlock(&st_lock);
-            if (do_beep) {
-                beep();
-            }
+            --st;
+        }
+        pthread_rwlock_unlock(&st_lock);
+        if (do_beep) {
+            beep();
+        }
 
-            diff = time_ms() - frame_start;
-            if (diff > 0 && diff < 100) {
-                usleep(1000 * diff);
-            }
+        diff = time_ms() - frame_start;
+        if (diff < ms_per_frame) {
+            usleep(1000 * (ms_per_frame - diff));
         }
     }
 
@@ -777,24 +784,88 @@ handle_keyboard(void *ptr) {
     return NULL;
 }
 
+static void
+usage(const char *fmt, ...) {
+    va_list ap;
+
+    if (fmt != NULL) {
+        va_start(ap, fmt);
+        vprintf(fmt, ap);
+        va_end(ap);
+
+        fputc('\n', stdout);
+    }
+
+    puts("Usage: chip8 [options] <rom path>");
+    puts("Options:");
+    puts(" -f <fps>    Set the frames per second of the CPU. Certain games run better with");
+    puts("             higher values. The default is 120.");
+    puts(" -c <color>  Sets the color of the pixels. The default is green.");
+    puts("             Valid colors: red, green, blue, yellow, magenta, cyan, white.");
+}
+
+static bool
+parse_args(int argc, char **argv) {
+    int i;
+
+    for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-f") == 0 && i + 1 < argc) {
+            opt_fps = atoi(argv[++i]);
+            if (opt_fps < 60) {
+                usage("FPS cannot be lower than 60");
+                return false;
+            }
+        }
+        else if (strcmp(argv[i], "-c") == 0 && i + 1 < argc) {
+            ++i;
+            if (strcmp(argv[i], "red") == 0) {
+                opt_color = COLOR_RED;
+            }
+            else if (strcmp(argv[i], "green") == 0) {
+                opt_color = COLOR_GREEN;
+            }
+            else if (strcmp(argv[i], "blue") == 0) {
+                opt_color = COLOR_BLUE;
+            }
+            else if (strcmp(argv[i], "yellow") == 0) {
+                opt_color = COLOR_YELLOW;
+            }
+            else if (strcmp(argv[i], "magenta") == 0) {
+                opt_color = COLOR_MAGENTA;
+            }
+            else if (strcmp(argv[i], "cyan") == 0) {
+                opt_color = COLOR_CYAN;
+            }
+            else if (strcmp(argv[i], "white") == 0) {
+                opt_color = COLOR_WHITE;
+            }
+            else {
+                usage("Invalid color value");
+                return false;
+            }
+        }
+        else {
+            opt_path = argv[i];
+            break;
+        }
+    }
+
+    if (opt_path == NULL) {
+        usage("No ROM path given");
+        return false;
+    }
+
+    return true;
+}
+
 int
 main(int argc, char **argv) {
     uint64_t frame_start, diff;
     bool success = true;
     double ms_per_frame;
 
-    if (argc < 2) {
-        printf("Usage: chip8 <ROM> [FPS]\n");
+    if (!parse_args(argc, argv)) {
         return 1;
-    }
-
-    if (argc >= 3) {
-        fps = atoi(argv[2]);
-        if (fps < 60) {
-            printf("FPS cannot be lower than 60\n");
-            return 1;
-        }
-        
     }
 
     srand(time(NULL));
@@ -804,17 +875,17 @@ main(int argc, char **argv) {
     curs_set(0);
 
     start_color();
-    init_pair(1, COLOR_GREEN, COLOR_GREEN);
+    init_pair(1, opt_color, opt_color);
 
     initialize();
-    success = load(argv[1]);
+    success = load();
 
     if (success) {
         pthread_create(&thread_timers, NULL, handle_timers, NULL);
         pthread_create(&thread_keys, NULL, handle_keyboard, NULL);
     }
 
-    ms_per_frame = 1000.0 / (double)fps;
+    ms_per_frame = 1000.0 / (double)opt_fps;
     program_start = time(NULL);
 
     while (success && looping) {
@@ -822,7 +893,7 @@ main(int argc, char **argv) {
         success = cycle();
 
         if (draw_game) {
-            draw_game_win(win_game);
+            draw_game_win();
             draw_game = false;
         }
 
@@ -831,12 +902,11 @@ main(int argc, char **argv) {
         }
 
         if (draw_log) {
-            draw_log_win(win_log);
+            draw_log_win();
             draw_log = false;
         }
 
         if (!success) {
-            fgetc(stdin);
             break;
         }
 
@@ -849,6 +919,11 @@ main(int argc, char **argv) {
     }
 
     looping = false;
+
+    if (!success) {
+        draw_log_win();
+        fgetc(stdin);
+    }
 
     pthread_join(thread_timers, NULL);
     pthread_join(thread_keys, NULL);
